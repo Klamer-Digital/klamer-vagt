@@ -1,0 +1,62 @@
+# Vagten bag vagten (plan, milepæl 14): kalder hubbens /api/health hvert kvarter og fejler, hvis
+# hubben ikke svarer 200, hvis ok ikke er true, eller hvis drift-jobbet ikke er LYKKEDES i 30 min
+# (driftAlderMinutter = hele minutter siden seneste vellykkede kørsel; en fejlet kørsel giver ok=false).
+#
+# VIGTIGT:
+# - GitHub kører kun planlagte workflows (schedule) fra standardgrenen (main). Filen skal derfor
+#   også ligge på main; på andre grene kan den kun køres i hånden (workflow_dispatch).
+# - Mail ved fejl: GitHub sender notifikationer for planlagte workflows til den bruger, der sidst
+#   ændrede cron-linjen i denne fil (oprindeligt den, der oprettede workflowet). Bliver workflowet
+#   slået fra og til igen, går de i stedet til den, der slog det til. Den bruger skal være Lucas,
+#   så det er Lucas' GitHub-konto, der skal pushe/merge ændringer af cron-linjen.
+# - Lucas skal have Actions-notifikationer slået til: github.com → Settings → Notifications →
+#   "Actions" → Email (gerne "Only notify for failed workflows").
+# - GitHub kan forsinke eller springe planlagte kørsler over ved høj belastning; derfor tåler
+#   tjekket én udeblevet drift-kørsel (30 min), og hvert kald prøves to gange.
+#
+# Ingen secrets: ruten er offentlig og svarer kun med status og tidsstempler.
+name: Hub-vagt
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hub-vagt
+  cancel-in-progress: false
+
+jobs:
+  vagt:
+    name: Hubbens /api/health
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      HEALTH_URL: https://klamer-hub-production.up.railway.app/api/health
+      MAKS_ALDER_MIN: "30"
+    steps:
+      - name: Tjek hubben og drift-jobbet (2 forsøg)
+        run: |
+          set -u
+          tjek() {
+            status=$(curl -sS -o svar.json -w '%{http_code}' --connect-timeout 10 --max-time 20 "$HEALTH_URL") || status="000"
+            if [ "$status" != "200" ]; then
+              echo "::warning::HTTP $status fra $HEALTH_URL"
+              return 1
+            fi
+            if ! jq -e --argjson maks "$MAKS_ALDER_MIN" \
+              '.ok == true and ((.driftAlderMinutter == null) or (.driftAlderMinutter <= $maks))' svar.json > /dev/null; then
+              echo "::warning::Hubben svarede, men er ikke sund:"
+              jq -c '{ok, tjek, driftAlderMinutter}' svar.json || true
+              return 1
+            fi
+            jq -c '{ok, version, tjek, driftAlderMinutter}' svar.json
+          }
+          if tjek; then exit 0; fi
+          sleep 30
+          if tjek; then exit 0; fi
+          echo "::error::Klamer Hub er nede, eller drift-jobbet har ikke kørt i over $MAKS_ALDER_MIN min."
+          exit 1
