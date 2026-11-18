@@ -15,6 +15,9 @@
 #   tjekket én udeblevet drift-kørsel (30 min), og hvert kald prøves to gange.
 #
 # Ingen secrets: ruten er offentlig og svarer kun med status og tidsstempler.
+#
+# Hvert punkt i matrix.include tjekkes for sig med samme tjek (fail-fast er slået fra, så ét nede
+# punkt ikke skjuler et andet). marketing-mcp's /healthz svarer {"ok":true} uden drift-alder.
 name: Hub-vagt
 
 on:
@@ -31,11 +34,20 @@ concurrency:
 
 jobs:
   vagt:
-    name: Hubbens /api/health
+    name: ${{ matrix.navn }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - navn: Hubbens /api/health
+            url: https://klamer-hub-production.up.railway.app/api/health
+          - navn: marketing-mcp på Hetzner, /healthz
+            url: https://marketing-mcp.hub.klamer-digital.dk/healthz
     env:
-      HEALTH_URL: https://klamer-hub-production.up.railway.app/api/health
+      NAVN: ${{ matrix.navn }}
+      HEALTH_URL: ${{ matrix.url }}
       MAKS_ALDER_MIN: "30"
     steps:
       - name: Tjek hubben og drift-jobbet (2 forsøg)
@@ -58,5 +70,5 @@ jobs:
           if tjek; then exit 0; fi
           sleep 30
           if tjek; then exit 0; fi
-          echo "::error::Klamer Hub er nede, eller drift-jobbet har ikke kørt i over $MAKS_ALDER_MIN min."
+          echo "::error::$NAVN er nede eller ikke sund ($HEALTH_URL). For hubben kan det også være, at drift-jobbet ikke har kørt i over $MAKS_ALDER_MIN min."
           exit 1
