@@ -72,3 +72,44 @@ jobs:
           if tjek; then exit 0; fi
           echo "::error::$NAVN er nede eller ikke sund ($HEALTH_URL). For hubben kan det også være, at drift-jobbet ikke har kørt i over $MAKS_ALDER_MIN min."
           exit 1
+
+  # Nattens backup af Klamer Hub-serveren (hub-repoet, infra/server/backup.sh). Serveren skriver
+  # status.json efter hver kørsel. Alarm (rødt job, og dermed GitHub-mail som for de andre punkter),
+  # når den seneste kørsel mislykkedes, når den seneste vellykkede er ældre end MAKS_ALDER_TIMER,
+  # når den aldrig er kørt (status findes ikke), eller når statussen ikke kan hentes. 30 timer
+  # tåler én forsinket natkørsel. Ingen secrets: filen er offentlig og viser kun ok og tidspunkter.
+  backup:
+    name: Nattens backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      STATUS_URL: https://hub.klamer-digital.dk/_backup/status.json
+      MAKS_ALDER_TIMER: "30"
+    steps:
+      - name: Tjek at den seneste backup lykkedes og ikke er for gammel (2 forsøg)
+        run: |
+          set -u
+          tjek() {
+            status=$(curl -sS -o status.json -w '%{http_code}' --connect-timeout 10 --max-time 20 "$STATUS_URL") || status="000"
+            if [ "$status" != "200" ]; then
+              echo "::warning::HTTP $status fra $STATUS_URL (er backuppen aldrig kørt?)"
+              return 1
+            fi
+            if ! jq -e '.ok == true' status.json > /dev/null; then
+              echo "::warning::Seneste backup mislykkedes:"
+              jq -c '{ok, lastSuccess, lastAttempt, fejl}' status.json || true
+              return 1
+            fi
+            if ! jq -e --argjson maks "$MAKS_ALDER_TIMER" \
+              '.lastSuccess != null and ((now - (.lastSuccess | fromdateiso8601)) / 3600 <= $maks)' status.json > /dev/null; then
+              echo "::warning::Seneste vellykkede backup er for gammel (over $MAKS_ALDER_TIMER timer) eller mangler:"
+              jq -c '{ok, lastSuccess, lastAttempt}' status.json || true
+              return 1
+            fi
+            jq -c '{ok, lastSuccess}' status.json
+          }
+          if tjek; then exit 0; fi
+          sleep "${RETRY_SLEEP:-30}"
+          if tjek; then exit 0; fi
+          echo "::error::Backuppen er mislykket, for gammel eller aldrig kørt ($STATUS_URL)."
+          exit 1
